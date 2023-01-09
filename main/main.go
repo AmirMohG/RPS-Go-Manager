@@ -3,7 +3,7 @@ package main
 import (
     "fmt"
     "golang.org/x/crypto/bcrypt"
-    "database/sql"
+    _ "database/sql"
     "github.com/joho/godotenv"
     "os"
     "os/exec"
@@ -12,53 +12,54 @@ import (
     "github.com/gin-gonic/gin"
     _ "net/http"
     _ "io"
-    _ "strings"
+    "strings"
     _ "strconv"
     "rps.local/date"
+    "gorm.io/gorm"
+    "gorm.io/driver/mysql"
 )
-
+type DB struct{
+    Username string
+    Password string
+    Host string
+    Port string
+    Database string
+}
 type reqBody struct {
     Username string `json:"username"`
     Password string `json:"password"`
     Vmid string `json:"vmid"`
-    Expiry date.Date `json:"expiry"`
+    Duration int `json:"duration"`
     Ram float32 `json:"ram"`
     Cpu float32 `json:"cpu"`
     Price int `json:"price"`
 }
 type User struct {
-    Username string `json:"username"`
-    Password string `json:"password"`
-    Date_created date.Date `json:"date_created"`
+    Username string `json:"username" gorm:"primaryKey" gorm:"column:username;not_null;type:varchar;size:32;unique_index"`
+    Password string `json:"password" gorm:"column:password;not null;size:64"`
+    Date_created string `json:"date_created" gorm:"column:date_created;not null;size:20"`
 }
- 
+
 type VM struct {
-    Vmid string `json:"vmid"`
-    Owner string `json:"owner"`
-    Expiry date.Date `json:"expiry"`
-    Ram float32 `json:"ram"`
-    Cpu float32 `json:"cpu"`
-    Price int `json:"price"`
+    Vmid string `json:"vmid" gorm:"primaryKey" gorm:"column:vmid;not null`
+    Owner string `json:"owner" gorm:"column:owner;not null;references:users(username)"`
+    Expiry string `json:"expiry" gorm:"column:expiry;not null"`
+    Ram float32 `json:"ram" gorm:"column:ram;not null"`
+    Cpu float32 `json:"cpu" gorm:"column:cpu;not null"`
+    Price int `json:"price" gorm:"column:price;not null"`
+    user []User `gorm:"foreignKey:Username;references:Owner"`
+
 }
-var db *sql.DB
+var db *gorm.DB
 func main() {
     godotenv.Load(".env")
     APP_HOST := os.Getenv("APP_HOST")
     APP_PORT := os.Getenv("APP_PORT")
     ADDR := fmt.Sprintf(APP_HOST + ":" + APP_PORT)
-    fmt.Println(ADDR)
-    MYSQL_HOST := os.Getenv("MYSQL_HOST")
-    MYSQL_DB := os.Getenv("MYSQL_DB")
-    MYSQL_USER := os.Getenv("MYSQL_USER")
-    MYSQL_PASS := os.Getenv("MYSQL_PASS")
-    MYSQL_PORT := os.Getenv("MYSQL_PORT")
-    db = databaseCon(fmt.Sprintf(MYSQL_USER + ":" + MYSQL_PASS +"@tcp(" + MYSQL_HOST + ":" + MYSQL_PORT + ")/" + MYSQL_DB))
-    // vm := VM{vmid: "203", owner: "amg", expiry: 25, ram: 2, cpu: 2}
-    var d date.Date
-    date.Now(&d)
-    fmt.Println(date.ToString(d))
-    fmt.Println(date.ToString(date.ToDate("2023 1 9")))
+    db = InitGormMysql(db)
     
+    db.AutoMigrate(&VM{})
+    db.AutoMigrate(&User{})
     router := gin.Default()
 	router.GET("/register", func(res *gin.Context) {
 		res.JSON(200, gin.H{
@@ -83,7 +84,7 @@ func main() {
         if err != nil {
             panic(err)
         }
-            c.JSON(200, gin.H{"StatusCode": register(user, )})
+            c.JSON(200, gin.H{"StatusCode": register(user)})
 
     })
     router.POST("/api/buy", func(c *gin.Context) {
@@ -101,72 +102,94 @@ func main() {
         vm.Ram = req.Ram
         vm.Cpu = req.Cpu
         vm.Price = req.Price
-        
-            c.JSON(200, gin.H{"StatusCode": buyVM(user, vm)})
+        duration := req.Duration
+            c.JSON(200, gin.H{"StatusCode": buyVM(user, vm, duration)})
 
     })
 	router.Run(ADDR)
-    //fmt.Println(listVMs("amg"))
-    //fmt.Println(authorized(user, vm))
-    //buyVM("amg", "205", 1, 1, 55)
-    //restartVM("amg", "205")
-    //fmt.Println(userExists(user))
-    //register("user4", "w20805338")
-
+    
 
 }
-func databaseCon(URI string) *sql.DB{
-    db , err := sql.Open("mysql", URI)
-    if err != nil {
-        panic(err)
+func InitGormMysql(conn *gorm.DB) (*gorm.DB) {
+	var err error
+    dbConf := DB{
+        Username: os.Getenv("MYSQL_USER"),
+        Password: os.Getenv("MYSQL_PASS"),
+        Host: os.Getenv("MYSQL_HOST"),
+        Port: os.Getenv("MYSQL_PORT"),
+        Database: os.Getenv("MYSQL_DB"),
     }
-    return db;
+    fmt.Println("CONFIG", dbConf)
+	conn, err = gorm.Open(mysql.New(mysql.Config{
+        DSN: fmt.Sprintf("%s:%s@(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+			dbConf.Username,
+			dbConf.Password,
+			dbConf.Host,
+			dbConf.Port,
+			dbConf.Database,
+		), 
+        DefaultStringSize: 256, // default size for string fields
+        DisableDatetimePrecision: true, // disable datetime precision, which not supported before MySQL 5.6
+        DontSupportRenameIndex: true, // drop & create when rename index, rename index not supported before MySQL 5.7, MariaDB
+        DontSupportRenameColumn: true, // `change` when rename column, rename column not supported before MySQL 8, MariaDB
+        SkipInitializeWithVersion: false, // auto configure based on currently MySQL version
+        }))
+	if err != nil {
+		panic(err)
+	}
+    return conn
 }
 func register(user User) string {
     if !userExists(user) && len(user.Username) < 32 && len(user.Username) > 3 && len(user.Password) > 8 {
         hashedPass := hash(user)
-        query := fmt.Sprintf("INSERT INTO Users (username, password, date_created) VALUES (\"" + user.Username + "\", \"" + hashedPass + "\", " + "NOW()" + ")")
-        _, err := db.Exec(query)
-        if err != nil {
-            panic(err)
+        user.Username = strings.ToLower(user.Username)
+        user.Password = hashedPass
+        var date_created date.Date
+        date.Now(&date_created)
+        user.Date_created = date.ToString(date_created)
+        res := db.Create(&user)
+        if res.Error != nil {
+            panic(res.Error)
         }
     } else {
         return "Bad credentials"
     }
     return "200"
+    
 }
 
-
 func userExists(user User) bool {
-    query := fmt.Sprintf("select username from Users where username = \"" + user.Username + "\"")
-    err := db.QueryRow(query).Scan(&user.Username)
-    if err != nil {
+    
+    res := db.First(&user, "username = ?", strings.ToLower(user.Username))
+    fmt.Println()
+    if res.Error != nil {
 	    return false
     } else {
         return true
     }
-    }
+}
 func hash(user User) string {
     password := []byte(user.Password)
 
-    // Hashing the password with the default cost of 10
     hashedPassword, err := bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
     if err != nil {
         panic(err)
     }
     return string(hashedPassword[:])
-
 }
-func buyVM (user User, vm VM) string {
-    //|| vm.Expiry < time.Now() 
-    if vm.Vmid == "" || vm.Owner == "" || vm.Ram < 100 || vm.Cpu < 100 || vm.Price < 5 {
+func buyVM (user User, vm VM, duration int) string {
+    if vm.Vmid == "" || !userExists(user) || vm.Ram < 100 || vm.Cpu < 1 || vm.Price < 5 {
         return "Bad credentials"
     } else if paid() {
-        query := fmt.Sprintf("INSERT INTO VMs (vmid, owner, expiry, ram, cpu, price) VALUES (\"" + vm.Vmid + "\", \"" + user.Username + "\", " + "NOW()" + ", " + fmt.Sprintf("%f", vm.Ram) + ", " + fmt.Sprintf("%f", vm.Cpu) + ", " + fmt.Sprintf("%v", vm.Price) + ")")
-        
-        _, err := db.Exec(query)
-        fmt.Println(query)
-        if err != nil {
+        var expiry date.Date
+        date.Now(&expiry)
+        date.IncMonth(&expiry, duration)
+        vm.Expiry = date.ToString(expiry)
+        res := db.Create(vm)
+        if res.Error != nil {
+            panic(res.Error)
+        }
+        if res.Error != nil {
             return "500"
         } else {
             return "200"
@@ -175,50 +198,17 @@ func buyVM (user User, vm VM) string {
     return "401"
 }
 
-func listVMs(user User) []string {
-    var vm VM
-    vms := make([]string, 1)
-    query := fmt.Sprintf("select vmid from VMs where owner = \"" + user.Username + "\"")
-    rows, err := db.Query(query)
-    if err != nil {
-        panic(err)
-    }
-    defer rows.Close()
-    for rows.Next() {
-        err := rows.Scan(&vm.Vmid)
-        vms = append(vms, vm.Vmid)
-        if err != nil {
-            panic(err)
-        }
-    }
-    err = rows.Err()
-    if err != nil {
-        panic(err)
-    }
-
-    return vms
-}
 func authorized(user User, vm VM) bool {
-    query := fmt.Sprintf("select vmid from VMs where owner = \"" + user.Username + "\"")
-    vmid := vm.Vmid
-    rows, err := db.Query(query)
-    if err != nil {
+    if !userExists(user) {
         return false
     }
-    defer rows.Close()
-    for rows.Next() {
-        err := rows.Scan(&vm.Vmid)
-        if vm.Vmid == vmid {
-            return true
-        }
-        if err != nil {
-            panic(err)
-        }
+    res := db.First(&vm, "owner = ?", strings.ToLower(user.Username))
+    if res.Error != nil {
+	    return false
+    } else {
+        return true
     }
-    err = rows.Err()
-    if err != nil {
-        panic(err)
-    }
+   
     return false
 }
 func paid() bool {
@@ -236,6 +226,4 @@ func restartVM(user User, vm VM) string{
     } else {
         return "401"
     }
-
-    
 }
